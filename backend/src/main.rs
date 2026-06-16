@@ -9,6 +9,7 @@ mod dtu_receiver;
 mod hydraulic_simulator;
 mod error_compensator;
 mod alarm_ws;
+mod metrics;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,6 +29,7 @@ use tracing::{info, error, warn};
 use uuid::Uuid;
 
 use crate::alerts::AlertManager;
+use crate::alarm_ws::AlarmWsService;
 use crate::clickhouse_store::ClickHouseStore;
 use crate::config_loader::AppConfig;
 use crate::dtu_receiver::{DtuReceiver, ValidatedSensor};
@@ -36,6 +38,7 @@ use crate::hydraulic::HydraulicModel;
 use crate::hydraulic_simulator::{HydraulicSimulator, SimulatorOutput};
 use crate::models::{ClepsydraConfig, HydraulicMetrics, PidState, SensorData};
 use crate::websocket::WebSocketBroadcaster;
+use crate::metrics::{gather_metrics_text, set_ws_clients, init_metrics};
 
 #[derive(Clone)]
 struct AppState {
@@ -67,6 +70,8 @@ async fn main() -> Result<()> {
 
     info!("启动古代水运仪象台漏壶水力精度仿真系统...");
 
+    let _metrics_registry = init_metrics();
+
     let config_path = std::env::var("APP_CONFIG")
         .unwrap_or_else(|_| "config/app_config.json".to_string());
     let mut config = AppConfig::load_from_file(&config_path)
@@ -94,9 +99,9 @@ async fn main() -> Result<()> {
     info!("日误差阈值: {}秒", config.alerts.daily_error_threshold_seconds);
 
     let store = Arc::new(ClickHouseStore::new(&clickhouse_url, &clickhouse_db)?);
-    let broadcaster = Arc::new(WebSocketBroadcaster::new(
+    let broadcaster = WebSocketBroadcaster::new(
         config.channels.alarm_broadcast_capacity,
-    ));
+    );
     let hydraulic_model = Arc::new(HydraulicModel::new());
     let alert_manager = Arc::new(AlertManager::new(
         config.alerts.daily_error_threshold_seconds,
@@ -187,6 +192,7 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
+        .route("/metrics", get(metrics_handler))
         .route("/api/configs", get(get_configs))
         .route("/api/sensor/:id", get(get_sensor_data))
         .route("/api/metrics/:id", get(get_metrics))
@@ -211,10 +217,11 @@ async fn ws_handler(
     let client_id = Uuid::new_v4().to_string();
     let broadcaster = state.broadcaster.clone();
 
-    ws.on_upgrade(|socket| async move {
+    ws.on_upgrade(move |socket| async move {
         use axum::extract::ws::{Message, WebSocket};
         use futures_util::{StreamExt, SinkExt};
 
+        set_ws_clients(broadcaster.client_count() as f64 + 1.0);
         let mut rx = broadcaster.subscribe(client_id.clone());
         let (mut sender, mut receiver) = socket.split();
 
@@ -233,10 +240,14 @@ async fn ws_handler(
             }
         });
 
+        let broadcaster_clone = broadcaster.clone();
+        let client_id_clone = client_id.clone();
         let recv_task = tokio::spawn(async move {
             while let Some(Ok(msg)) = receiver.next().await {
                 tracing::debug!("收到WebSocket消息: {:?}", msg);
             }
+            drop(broadcaster_clone);
+            drop(client_id_clone);
         });
 
         tokio::select! {
@@ -245,6 +256,7 @@ async fn ws_handler(
         }
 
         broadcaster.unsubscribe(&client_id);
+        set_ws_clients(broadcaster.client_count() as f64 - 1.0);
     })
 }
 
@@ -330,4 +342,8 @@ async fn get_status(
         })),
         message: None,
     })
+}
+
+async fn metrics_handler() -> String {
+    gather_metrics_text()
 }

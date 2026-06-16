@@ -6,6 +6,7 @@ use uuid::Uuid;
 use crate::mqtt_receiver::MqttReceiver;
 use crate::models::SensorData;
 use crate::config_loader::{AppConfig, MqttConfig};
+use crate::metrics::{record_sensor_received, record_validation_error};
 
 #[derive(Debug, Clone)]
 pub struct ValidatedSensor {
@@ -15,27 +16,35 @@ pub struct ValidatedSensor {
 
 fn validate_sensor(sensor: &SensorData, cfg: &AppConfig) -> Result<()> {
     if sensor.clepsydra_id.trim().is_empty() {
+        record_validation_error("unknown", "empty_id");
         anyhow::bail!("空的clepsydra_id");
     }
     if !cfg.clepsydras.iter().any(|c| c.clepsydra_id == sensor.clepsydra_id) {
+        record_validation_error(&sensor.clepsydra_id, "unknown_id");
         anyhow::bail!("未知漏壶ID: {}", sensor.clepsydra_id);
     }
     if sensor.water_level < 0.0 || sensor.water_level > 500.0 {
+        record_validation_error(&sensor.clepsydra_id, "water_level_out_of_range");
         anyhow::bail!("水位超范围: {:.2}cm", sensor.water_level);
     }
     if sensor.flow_rate < -10.0 || sensor.flow_rate > 100.0 {
+        record_validation_error(&sensor.clepsydra_id, "flow_rate_out_of_range");
         anyhow::bail!("流量超范围: {:.2}mL/s", sensor.flow_rate);
     }
     if sensor.water_temp < -50.0 || sensor.water_temp > 100.0 {
+        record_validation_error(&sensor.clepsydra_id, "temp_out_of_range");
         anyhow::bail!("水温超范围: {:.2}°C", sensor.water_temp);
     }
     if sensor.humidity < 0.0 || sensor.humidity > 100.0 {
+        record_validation_error(&sensor.clepsydra_id, "humidity_out_of_range");
         anyhow::bail!("湿度超范围: {:.2}%", sensor.humidity);
     }
     if sensor.quality < 0.0 || sensor.quality > 2.0 {
+        record_validation_error(&sensor.clepsydra_id, "quality_out_of_range");
         anyhow::bail!("水质系数超范围: {:.2}", sensor.quality);
     }
     if sensor.pressure < 50.0 || sensor.pressure > 150.0 {
+        record_validation_error(&sensor.clepsydra_id, "pressure_out_of_range");
         anyhow::bail!("气压超范围: {:.2}kPa", sensor.pressure);
     }
     Ok(())
@@ -76,6 +85,8 @@ impl DtuReceiver {
                 let received_at = chrono::Utc::now();
                 match validate_sensor(&sensor_data, &config) {
                     Ok(()) => {
+                        let id = sensor_data.clepsydra_id.clone();
+                        record_sensor_received(&id);
                         let validated = ValidatedSensor {
                             sensor: sensor_data,
                             received_at,
@@ -83,7 +94,7 @@ impl DtuReceiver {
                         if let Err(e) = tx.send(validated).await {
                             warn!("[DTU] 下游通道已满或已关闭: {}", e);
                         } else {
-                            debug!("[DTU] {} 校验通过，送入仿真管线", sensor_data.clepsydra_id);
+                            debug!("[DTU] {} 校验通过，送入仿真管线", id);
                         }
                     }
                     Err(e) => {

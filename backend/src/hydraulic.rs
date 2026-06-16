@@ -18,7 +18,7 @@ impl HydraulicModel {
         (self.standard_pressure / p).powf(0.5)
     }
 
-    pub fn altitude_to_pressure(altitude_m: f64) -> f64 {
+    pub fn altitude_to_pressure(&self, altitude_m: f64) -> f64 {
         self.standard_pressure * (1.0 - 2.25577e-5 * altitude_m).powf(5.25588)
     }
 

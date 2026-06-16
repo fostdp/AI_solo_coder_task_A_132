@@ -9,6 +9,10 @@ use crate::dtu_receiver::ValidatedSensor;
 use crate::hydraulic::HydraulicModel;
 use crate::models::{ClepsydraConfig, HydraulicMetrics, SensorData};
 use crate::config_loader::AppConfig;
+use crate::metrics::{
+    set_water_level, set_flow_rate, set_theoretical_flow,
+    set_flow_error, set_evaporation, observe_processing,
+};
 
 #[derive(Debug, Clone)]
 pub struct SimulatorOutput {
@@ -60,6 +64,7 @@ impl HydraulicSimulator {
         debug!("[SIM] 水力仿真器启动");
 
         while let Some(validated) = self.rx.recv().await {
+            let t_start = std::time::Instant::now();
             let ValidatedSensor { sensor, received_at: _ } = validated;
 
             let config = {
@@ -115,6 +120,14 @@ impl HydraulicSimulator {
                 errors.insert(sensor.clepsydra_id.clone(), new_error);
                 new_error
             };
+
+            let id = &sensor.clepsydra_id;
+            set_water_level(id, sensor.water_level);
+            set_flow_rate(id, sensor.flow_rate);
+            set_theoretical_flow(id, theoretical_flow);
+            set_flow_error(id, flow_error);
+            set_evaporation(id, evaporation_rate);
+            observe_processing("simulator", t_start.elapsed().as_secs_f64());
 
             let metrics = HydraulicMetrics {
                 timestamp: Utc::now(),

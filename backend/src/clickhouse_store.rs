@@ -1,12 +1,21 @@
 use std::time::Duration;
+use std::fmt;
 use anyhow::{Context, Result};
 use clickhouse::{Client, Row};
 use serde::{Deserialize, Serialize};
-use crate::models::{SensorData, HydraulicMetrics, AlertEvent, AlertType, AlertLevel, ClepsydraConfig};
+use crate::models::{SensorData, HydraulicMetrics, AlertEvent, ClepsydraConfig};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ClickHouseStore {
     client: Client,
+}
+
+impl fmt::Debug for ClickHouseStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClickHouseStore")
+            .field("client", &"<ClickHouse Client>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Row, Serialize, Deserialize)]

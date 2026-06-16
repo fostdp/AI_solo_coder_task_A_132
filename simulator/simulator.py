@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-古代水运仪象台漏壶传感器模拟器
+古代水运仪象台漏壶传感器模拟器（增强版）
 模拟四级漏壶（天上壶、夜漏壶、平水壶、万分水）的传感器数据
-每秒通过MQTT上报水位、流量、水温、环境湿度、水质
+支持自定义水温和气压条件、水位异常注入
 """
 
 import json
@@ -10,6 +10,8 @@ import time
 import random
 import math
 import argparse
+import os
+import sys
 from datetime import datetime
 
 try:
@@ -67,21 +69,43 @@ CLEPSYDRAS = [
 ]
 
 GRAVITY = 980.665
+STANDARD_PRESSURE = 101.325
 
 
 class ClepsydraSimulator:
-    def __init__(self, config, start_time=None, altitude_m=0):
+    def __init__(
+        self,
+        config,
+        start_time=None,
+        altitude_m=0,
+        base_temp=20.0,
+        base_pressure=None,
+        temp_variation=5.0,
+    ):
         self.config = config
         self.water_level = config["init_level"]
-        self.water_temp = 20.0
+        self.base_temp = base_temp
+        self.water_temp = base_temp
         self.humidity = 60.0
         self.quality = 1.0
         self.flow_rate = config["base_flow"]
         self.last_time = start_time or time.time()
         self.inflow = config["base_flow"] * 1.05
         self.day_phase = 0.0
-        self.base_pressure = 101.325 * math.pow(1.0 - 2.25577e-5 * altitude_m, 5.25588)
+        self.temp_variation = temp_variation
+
+        if base_pressure is not None:
+            self.base_pressure = base_pressure
+        else:
+            self.base_pressure = STANDARD_PRESSURE * math.pow(
+                1.0 - 2.25577e-5 * altitude_m, 5.25588
+            )
         self.pressure = self.base_pressure
+
+        self.abnormal_active = False
+        self.abnormal_timer = 0.0
+        self.abnormal_target_level = None
+        self.abnormal_duration = 0.0
 
     def viscosity_correction(self, temp_c):
         t = max(0.0, min(100.0, temp_c))
@@ -109,13 +133,21 @@ class ClepsydraSimulator:
         volume_flux = mass_flux * surface_area * self.quality / 1000.0
         return volume_flux * dt
 
+    def inject_abnormal_water_level(self, target_level, duration=60):
+        """注入水位异常"""
+        self.abnormal_active = True
+        self.abnormal_target_level = target_level
+        self.abnormal_duration = duration
+        self.abnormal_timer = 0.0
+        print(f"  ⚠️  {self.config['name']} 注入水位异常: {target_level:.1f}cm, 持续 {duration}s")
+
     def update(self, dt):
         self.day_phase += dt / 86400.0
         if self.day_phase > 1.0:
             self.day_phase -= 1.0
 
-        temp_variation = 5.0 * math.sin(2 * math.pi * (self.day_phase - 0.25))
-        self.water_temp = 20.0 + temp_variation + random.gauss(0, 0.3)
+        temp_variation = self.temp_variation * math.sin(2 * math.pi * (self.day_phase - 0.25))
+        self.water_temp = self.base_temp + temp_variation + random.gauss(0, 0.3)
 
         humidity_variation = 15.0 * math.sin(2 * math.pi * (self.day_phase - 0.5))
         self.humidity = 60.0 + humidity_variation + random.gauss(0, 1.0)
@@ -127,7 +159,7 @@ class ClepsydraSimulator:
 
         pressure_variation = 0.3 * math.sin(2 * math.pi * (self.day_phase - 0.3))
         self.pressure = self.base_pressure + pressure_variation + random.gauss(0, 0.05)
-        self.pressure = max(50.0, min(110.0, self.pressure))
+        self.pressure = max(50.0, min(150.0, self.pressure))
 
         self.flow_rate = self.calculate_flow()
 
@@ -137,14 +169,29 @@ class ClepsydraSimulator:
         level_change = net_volume_change / self.config["cross_section"]
 
         self.water_level += level_change
-        self.water_level = max(self.config["min_level"], min(self.config["max_level"], self.water_level))
+        self.water_level = max(
+            self.config["min_level"], min(self.config["max_level"], self.water_level)
+        )
+
+        if self.abnormal_active:
+            self.abnormal_timer += dt
+            if self.abnormal_timer < self.abnormal_duration:
+                target = self.abnormal_target_level
+                self.water_level += (target - self.water_level) * 0.2
+            else:
+                self.abnormal_active = False
+                self.abnormal_timer = 0.0
+                self.abnormal_target_level = None
+                print(f"  ✓ {self.config['name']} 水位异常结束，恢复正常")
 
         if self.water_level <= self.config["min_level"] + 1.0:
             self.inflow = self.config["base_flow"] * 1.2
         elif self.water_level >= self.config["max_level"] - 5.0:
             self.inflow = self.config["base_flow"] * 0.9
         else:
-            self.inflow = self.config["base_flow"] * (1.0 + 0.1 * math.sin(self.day_phase * 2 * math.pi))
+            self.inflow = self.config["base_flow"] * (
+                1.0 + 0.1 * math.sin(self.day_phase * 2 * math.pi)
+            )
 
     def get_sensor_data(self):
         return {
@@ -160,9 +207,9 @@ class ClepsydraSimulator:
 
 def on_connect(client, userdata, flags, rc):
     if rc == 0:
-        print("MQTT连接成功")
+        print("✅ MQTT连接成功")
     else:
-        print(f"MQTT连接失败，错误码: {rc}")
+        print(f"❌ MQTT连接失败，错误码: {rc}")
 
 
 def publish_sensor_data(client, topic_prefix, simulators):
@@ -171,30 +218,112 @@ def publish_sensor_data(client, topic_prefix, simulators):
         data = sim.get_sensor_data()
         payload = json.dumps(data)
         client.publish(topic, payload, qos=1)
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] {sim.config['name']}({sim.config['id']}): "
-              f"水位={data['water_level']:.2f}cm, 流量={data['flow_rate']:.4f}mL/s, "
-              f"水温={data['water_temp']:.1f}°C, 气压={data['pressure']:.2f}kPa")
+        print(
+            f"[{datetime.now().strftime('%H:%M:%S')}] "
+            f"{sim.config['name']}({sim.config['id']}): "
+            f"水位={data['water_level']:.2f}cm, "
+            f"流量={data['flow_rate']:.4f}mL/s, "
+            f"水温={data['water_temp']:.1f}°C, "
+            f"气压={data['pressure']:.2f}kPa"
+        )
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="漏壶传感器模拟器（增强版）",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  # 默认参数运行
+  python simulator.py
+
+  # 模拟高海拔（拉萨 3650m）
+  python simulator.py --altitude 3650
+
+  # 模拟高温环境（35°C 基准水温）
+  python simulator.py --water-temp 35
+
+  # 设定固定气压（95kPa）
+  python simulator.py --pressure 95
+
+  # 每隔120秒在平水壶注入低水位异常
+  python simulator.py --abnormal --abnormal-interval 120 --abnormal-target KD3 --abnormal-level 15
+
+  # 同时模拟高温+低气压+水位异常
+  python simulator.py --water-temp 30 --pressure 90 --abnormal --abnormal-interval 60
+        """,
+    )
+    parser.add_argument("--broker", default=os.getenv("MQTT_BROKER", "localhost"), help="MQTT broker地址")
+    parser.add_argument("--port", type=int, default=int(os.getenv("MQTT_PORT", "1883")), help="MQTT端口")
+    parser.add_argument("--topic", default=os.getenv("MQTT_TOPIC", "clepsydra/sensor"), help="MQTT主题前缀")
+    parser.add_argument("--interval", type=float, default=float(os.getenv("SIM_INTERVAL", "1.0")), help="上报间隔（秒）")
+    parser.add_argument("--simulate-days", type=float, default=0, help="加速模拟天数（0为实时）")
+
+    parser.add_argument("--altitude", type=float, default=float(os.getenv("SIM_ALTITUDE", "0")), help="海拔高度（米），用于计算基准气压")
+    parser.add_argument("--water-temp", type=float, default=float(os.getenv("SIM_WATER_TEMP", "20.0")), help="基准水温（°C）")
+    parser.add_argument("--pressure", type=float, default=None, help="固定基准气压（kPa），会覆盖--altitude计算值")
+    parser.add_argument("--temp-variation", type=float, default=5.0, help="水温日变化幅度（°C）")
+
+    parser.add_argument(
+        "--abnormal",
+        action="store_true",
+        default=os.getenv("SIM_ABNORMAL_WATER_LEVEL", "false").lower() == "true",
+        help="启用水位异常注入",
+    )
+    parser.add_argument(
+        "--abnormal-interval",
+        type=int,
+        default=int(os.getenv("SIM_ABNORMAL_INTERVAL", "300")),
+        help="水位异常注入间隔（秒）",
+    )
+    parser.add_argument(
+        "--abnormal-target",
+        default=os.getenv("SIM_ABNORMAL_TARGET", "random"),
+        help="异常目标漏壶ID（KD1/KD2/KD3/KD4/random）",
+    )
+    parser.add_argument(
+        "--abnormal-level",
+        type=float,
+        default=float(os.getenv("SIM_ABNORMAL_LEVEL", "10.0")),
+        help="异常水位值（cm）",
+    )
+    parser.add_argument(
+        "--abnormal-duration",
+        type=int,
+        default=int(os.getenv("SIM_ABNORMAL_DURATION", "60")),
+        help="异常持续时间（秒）",
+    )
+    parser.add_argument(
+        "--abnormal-type",
+        choices=["low", "high", "random"],
+        default=os.getenv("SIM_ABNORMAL_TYPE", "low"),
+        help="异常类型: low(低水位), high(高水位), random(随机)",
+    )
+
+    return parser.parse_args()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="漏壶传感器模拟器")
-    parser.add_argument("--broker", default="localhost", help="MQTT broker地址")
-    parser.add_argument("--port", type=int, default=1883, help="MQTT端口")
-    parser.add_argument("--topic", default="clepsydra/sensor", help="MQTT主题前缀")
-    parser.add_argument("--interval", type=float, default=1.0, help="上报间隔（秒）")
-    parser.add_argument("--simulate-days", type=float, default=0, help="加速模拟天数（0为实时）")
-    parser.add_argument("--altitude", type=float, default=0, help="海拔高度（米），用于模拟大气压")
-    args = parser.parse_args()
+    args = parse_args()
 
-    print("=" * 60)
-    print("  古代水运仪象台 - 漏壶传感器模拟器")
-    print("=" * 60)
-    print(f"Broker: {args.broker}:{args.port}")
-    print(f"Topic: {args.topic}/<漏壶ID>")
-    print(f"间隔: {args.interval}秒")
-    print(f"海拔: {args.altitude}m")
+    print("=" * 70)
+    print("  古代水运仪象台 - 漏壶传感器模拟器（增强版）")
+    print("=" * 70)
+    print(f"Broker:      {args.broker}:{args.port}")
+    print(f"Topic:       {args.topic}/<漏壶ID>")
+    print(f"间隔:        {args.interval}秒")
+    print(f"海拔:        {args.altitude}m")
+    print(f"基准水温:    {args.water_temp}°C")
+    print(f"基准气压:    {args.pressure or '由海拔计算'} kPa")
+    print(f"水位异常:    {'启用' if args.abnormal else '禁用'}")
+    if args.abnormal:
+        print(f"  目标:      {args.abnormal_target}")
+        print(f"  类型:      {args.abnormal_type}")
+        print(f"  间隔:      {args.abnormal_interval}s")
+        print(f"  持续:      {args.abnormal_duration}s")
+        print(f"  异常水位:  {args.abnormal_level}cm")
     print(f"模拟四级漏壶: KD1天上壶, KD2夜漏壶, KD3平水壶, KD4万分水")
-    print("=" * 60)
+    print("=" * 70)
 
     client = mqtt.Client(client_id=f"clepsydra-simulator-{int(time.time())}")
     client.on_connect = on_connect
@@ -202,16 +331,28 @@ def main():
     try:
         client.connect(args.broker, args.port, keepalive=60)
     except Exception as e:
-        print(f"无法连接MQTT broker: {e}")
+        print(f"❌ 无法连接MQTT broker: {e}")
         print("请确保MQTT服务器已启动，或使用 --broker 指定正确地址")
-        exit(1)
+        sys.exit(1)
 
     client.loop_start()
 
-    simulators = [ClepsydraSimulator(cfg, altitude_m=args.altitude) for cfg in CLEPSYDRAS]
+    base_pressure = args.pressure
+    simulators = [
+        ClepsydraSimulator(
+            cfg,
+            altitude_m=args.altitude,
+            base_temp=args.water_temp,
+            base_pressure=base_pressure,
+            temp_variation=args.temp_variation,
+        )
+        for cfg in CLEPSYDRAS
+    ]
+
+    abnormal_counter = 0
 
     try:
-        print("\n开始发送传感器数据... (Ctrl+C 停止)\n")
+        print("\n🚀 开始发送传感器数据... (Ctrl+C 停止)\n")
         while True:
             dt = args.interval
             if args.simulate_days > 0:
@@ -221,10 +362,40 @@ def main():
                 sim.update(dt)
 
             publish_sensor_data(client, args.topic, simulators)
+
+            if args.abnormal:
+                abnormal_counter += args.interval
+                if abnormal_counter >= args.abnormal_interval:
+                    abnormal_counter = 0
+
+                    if args.abnormal_target == "random":
+                        target_sim = random.choice(simulators)
+                    else:
+                        target_sim = next(
+                            (s for s in simulators if s.config["id"] == args.abnormal_target),
+                            None,
+                        )
+                        if target_sim is None:
+                            print(f"⚠️  未找到目标漏壶: {args.abnormal_target}")
+                            target_sim = random.choice(simulators)
+
+                    abnormal_type = args.abnormal_type
+                    if abnormal_type == "random":
+                        abnormal_type = random.choice(["low", "high"])
+
+                    if abnormal_type == "low":
+                        level = args.abnormal_level
+                    else:
+                        level = target_sim.config["max_level"] - args.abnormal_level
+
+                    target_sim.inject_abnormal_water_level(
+                        level, duration=args.abnormal_duration
+                    )
+
             time.sleep(args.interval)
 
     except KeyboardInterrupt:
-        print("\n\n模拟器已停止")
+        print("\n\n🛑 模拟器已停止")
     finally:
         client.loop_stop()
         client.disconnect()

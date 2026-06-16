@@ -6,6 +6,7 @@ use crate::error_compensator::CompensatedOutput;
 use crate::alerts::AlertManager;
 use crate::clickhouse_store::ClickHouseStore;
 use crate::websocket::WebSocketBroadcaster;
+use crate::metrics::inc_alert;
 
 pub struct AlarmWsService {
     alert_manager: Arc<AlertManager>,
@@ -39,6 +40,11 @@ impl AlarmWsService {
     }
 
     async fn persist_and_push(&self, alert: &crate::models::AlertEvent) {
+        inc_alert(
+            &alert.clepsydra_id,
+            &alert.alert_type.as_str(),
+            &alert.alert_level.as_str(),
+        );
         self.broadcaster.broadcast_alert(alert);
         if let Err(e) = self.store.insert_alert(alert).await {
             warn!("[ALM] 告警入库失败: {}", e);

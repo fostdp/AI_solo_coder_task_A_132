@@ -7,6 +7,7 @@ use tracing::{debug, warn};
 use crate::hydraulic_simulator::SimulatorOutput;
 use crate::models::{HydraulicMetrics, PidState, SensorData, ClepsydraConfig};
 use crate::config_loader::{AppConfig, PidConfig};
+use crate::metrics::{set_daily_error, set_compensation_flow, observe_processing};
 
 #[derive(Debug, Clone)]
 pub struct CompensatedOutput {
@@ -65,6 +66,7 @@ impl ErrorCompensator {
         debug!("[PID] 误差补偿器启动");
 
         while let Some(input) = self.rx.recv().await {
+            let t_start = std::time::Instant::now();
             let SimulatorOutput { sensor, metrics, config, dt } = input;
 
             let compensation_flow = {
@@ -88,6 +90,11 @@ impl ErrorCompensator {
                 );
                 output
             };
+
+            let id = sensor.clepsydra_id.clone();
+            set_daily_error(&id, metrics.daily_error_seconds);
+            set_compensation_flow(&id, compensation_flow);
+            observe_processing("compensator", t_start.elapsed().as_secs_f64());
 
             let updated_metrics = HydraulicMetrics {
                 compensation_flow,
