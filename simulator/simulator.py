@@ -70,7 +70,7 @@ GRAVITY = 980.665
 
 
 class ClepsydraSimulator:
-    def __init__(self, config, start_time=None):
+    def __init__(self, config, start_time=None, altitude_m=0):
         self.config = config
         self.water_level = config["init_level"]
         self.water_temp = 20.0
@@ -80,6 +80,8 @@ class ClepsydraSimulator:
         self.last_time = start_time or time.time()
         self.inflow = config["base_flow"] * 1.05
         self.day_phase = 0.0
+        self.base_pressure = 101.325 * math.pow(1.0 - 2.25577e-5 * altitude_m, 5.25588)
+        self.pressure = self.base_pressure
 
     def viscosity_correction(self, temp_c):
         t = max(0.0, min(100.0, temp_c))
@@ -123,6 +125,10 @@ class ClepsydraSimulator:
         self.quality += random.gauss(0, 0.02)
         self.quality = max(0.8, min(1.2, self.quality))
 
+        pressure_variation = 0.3 * math.sin(2 * math.pi * (self.day_phase - 0.3))
+        self.pressure = self.base_pressure + pressure_variation + random.gauss(0, 0.05)
+        self.pressure = max(50.0, min(110.0, self.pressure))
+
         self.flow_rate = self.calculate_flow()
 
         outflow = self.flow_rate
@@ -147,6 +153,7 @@ class ClepsydraSimulator:
             "water_temp": round(self.water_temp, 2),
             "humidity": round(self.humidity, 1),
             "quality": round(self.quality, 3),
+            "pressure": round(self.pressure, 3),
             "timestamp": int(time.time() * 1000),
         }
 
@@ -166,7 +173,7 @@ def publish_sensor_data(client, topic_prefix, simulators):
         client.publish(topic, payload, qos=1)
         print(f"[{datetime.now().strftime('%H:%M:%S')}] {sim.config['name']}({sim.config['id']}): "
               f"水位={data['water_level']:.2f}cm, 流量={data['flow_rate']:.4f}mL/s, "
-              f"水温={data['water_temp']:.1f}°C, 湿度={data['humidity']:.1f}%")
+              f"水温={data['water_temp']:.1f}°C, 气压={data['pressure']:.2f}kPa")
 
 
 def main():
@@ -176,6 +183,7 @@ def main():
     parser.add_argument("--topic", default="clepsydra/sensor", help="MQTT主题前缀")
     parser.add_argument("--interval", type=float, default=1.0, help="上报间隔（秒）")
     parser.add_argument("--simulate-days", type=float, default=0, help="加速模拟天数（0为实时）")
+    parser.add_argument("--altitude", type=float, default=0, help="海拔高度（米），用于模拟大气压")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -184,6 +192,7 @@ def main():
     print(f"Broker: {args.broker}:{args.port}")
     print(f"Topic: {args.topic}/<漏壶ID>")
     print(f"间隔: {args.interval}秒")
+    print(f"海拔: {args.altitude}m")
     print(f"模拟四级漏壶: KD1天上壶, KD2夜漏壶, KD3平水壶, KD4万分水")
     print("=" * 60)
 
@@ -199,7 +208,7 @@ def main():
 
     client.loop_start()
 
-    simulators = [ClepsydraSimulator(cfg) for cfg in CLEPSYDRAS]
+    simulators = [ClepsydraSimulator(cfg, altitude_m=args.altitude) for cfg in CLEPSYDRAS]
 
     try:
         print("\n开始发送传感器数据... (Ctrl+C 停止)\n")

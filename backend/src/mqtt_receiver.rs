@@ -12,8 +12,14 @@ struct MqttSensorPayload {
     water_temp: f64,
     humidity: f64,
     quality: f64,
+    #[serde(default = "default_pressure")]
+    pressure: f64,
     #[serde(default)]
     timestamp: Option<i64>,
+}
+
+fn default_pressure() -> f64 {
+    101.325
 }
 
 pub struct MqttReceiver {
@@ -102,6 +108,7 @@ impl MqttReceiver {
             water_temp: parsed.water_temp,
             humidity: parsed.humidity,
             quality: parsed.quality,
+            pressure: parsed.pressure,
         })
     }
 }

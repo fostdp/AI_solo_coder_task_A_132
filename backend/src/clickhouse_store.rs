@@ -18,6 +18,7 @@ struct SensorRow {
     water_temp: f64,
     humidity: f64,
     quality: f64,
+    pressure: f64,
 }
 
 #[derive(Debug, Row, Serialize, Deserialize)]
@@ -77,6 +78,7 @@ impl ClickHouseStore {
             water_temp: data.water_temp,
             humidity: data.humidity,
             quality: data.quality,
+            pressure: data.pressure,
         };
 
         let mut insert = self.client.insert("sensor_data")?;
@@ -171,7 +173,7 @@ impl ClickHouseStore {
         use chrono::{TimeZone, Utc};
 
         let query = format!(
-            "SELECT timestamp, clepsydra_id, water_level, flow_rate, water_temp, humidity, quality \
+            "SELECT timestamp, clepsydra_id, water_level, flow_rate, water_temp, humidity, quality, pressure \
              FROM sensor_data WHERE clepsydra_id = '{}' \
              ORDER BY timestamp DESC LIMIT {}",
             clepsydra_id, limit
@@ -187,6 +189,7 @@ impl ClickHouseStore {
             water_temp: r.water_temp,
             humidity: r.humidity,
             quality: r.quality,
+            pressure: r.pressure,
         }).collect())
     }
 

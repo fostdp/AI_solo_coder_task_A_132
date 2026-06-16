@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS sensor_data (
     water_temp Float64 COMMENT '水温 (°C)',
     humidity Float64 COMMENT '环境湿度 (%)',
     quality Float64 COMMENT '水质系数 (0.8-1.2)',
+    pressure Float64 DEFAULT 101.325 COMMENT '大气压 (kPa)',
     received_at DateTime64(3, 'Asia/Shanghai') DEFAULT now64(3)
 )
 ENGINE = MergeTree()

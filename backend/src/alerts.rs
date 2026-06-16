@@ -173,14 +173,16 @@ impl CompensationController {
                 let quality_factor = quality;
                 crate::models::PidState::new(
                     base_kp * temp_factor * quality_factor,
-                    0.1 * temp_factor,
-                    0.05,
+                    0.05 * temp_factor,
+                    0.1,
                     -1.5,
                     1.5,
                 )
+                .with_feedforward(0.08)
+                .with_rate_limit(0.3)
             });
 
-        let compensation = pid.compute(setpoint_flow, actual_flow, dt);
+        let compensation = pid.compute(setpoint_flow, actual_flow, water_temp, dt);
         (compensation, pid.clone())
     }
 

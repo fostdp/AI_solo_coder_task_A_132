@@ -2,13 +2,24 @@ use crate::models::{SensorData, ClepsydraConfig};
 
 pub struct HydraulicModel {
     gravity: f64,
+    standard_pressure: f64,
 }
 
 impl HydraulicModel {
     pub fn new() -> Self {
         Self {
             gravity: 980.665,
+            standard_pressure: 101.325,
         }
+    }
+
+    pub fn pressure_correction(&self, pressure_kpa: f64) -> f64 {
+        let p = pressure_kpa.max(50.0).min(110.0);
+        (self.standard_pressure / p).powf(0.5)
+    }
+
+    pub fn altitude_to_pressure(altitude_m: f64) -> f64 {
+        self.standard_pressure * (1.0 - 2.25577e-5 * altitude_m).powf(5.25588)
     }
 
     pub fn calculate_theoretical_flow(
@@ -38,12 +49,14 @@ impl HydraulicModel {
         humidity: f64,
         surface_area: f64,
         quality: f64,
+        pressure_kpa: f64,
     ) -> f64 {
         let t_kelvin = water_temp + 273.15;
         let svp = 610.78 * ((17.27 * water_temp) / (water_temp + 237.3)).exp();
         let avp = svp * (humidity / 100.0);
         let pressure_diff = svp - avp;
-        let mass_flux = 0.001 * pressure_diff / t_kelvin.sqrt();
+        let pressure_factor = self.pressure_correction(pressure_kpa);
+        let mass_flux = 0.001 * pressure_diff / t_kelvin.sqrt() * pressure_factor;
         let volume_flux = mass_flux * surface_area * quality / 1000.0;
         volume_flux
     }
@@ -131,8 +144,17 @@ mod tests {
     #[test]
     fn test_evaporation() {
         let model = HydraulicModel::new();
-        let evap = model.calculate_evaporation_rate(25.0, 60.0, 100.0, 1.0);
+        let evap = model.calculate_evaporation_rate(25.0, 60.0, 100.0, 1.0, 101.325);
         assert!(evap >= 0.0);
+    }
+
+    #[test]
+    fn test_pressure_correction() {
+        let model = HydraulicModel::new();
+        let sea_level = model.pressure_correction(101.325);
+        let high_altitude = model.pressure_correction(70.0);
+        assert!((sea_level - 1.0).abs() < 0.01);
+        assert!(high_altitude > 1.0);
     }
 
     #[test]

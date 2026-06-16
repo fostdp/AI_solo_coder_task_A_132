@@ -243,6 +243,7 @@ async fn process_sensor_data(state: AppState, sensor: SensorData) {
         sensor.humidity,
         config.cross_section_area,
         sensor.quality,
+        sensor.pressure,
     );
 
     let flow_error = state.hydraulic_model.calculate_flow_error(
