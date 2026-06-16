@@ -4,6 +4,11 @@ mod clickhouse_store;
 mod mqtt_receiver;
 mod websocket;
 mod alerts;
+mod config_loader;
+mod dtu_receiver;
+mod hydraulic_simulator;
+mod error_compensator;
+mod alarm_ws;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,28 +21,31 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use chrono::Utc;
 use parking_lot::Mutex;
 use serde::Serialize;
 use tower_http::cors::CorsLayer;
-use tracing::{info, error, warn, debug};
+use tracing::{info, error, warn};
 use uuid::Uuid;
 
-use crate::alerts::{AlertManager, CompensationController};
+use crate::alerts::AlertManager;
 use crate::clickhouse_store::ClickHouseStore;
+use crate::config_loader::AppConfig;
+use crate::dtu_receiver::{DtuReceiver, ValidatedSensor};
+use crate::error_compensator::{CompensatedOutput, ErrorCompensator};
 use crate::hydraulic::HydraulicModel;
-use crate::models::{ClepsydraConfig, HydraulicMetrics, SensorData};
-use crate::websocket::{WebSocketBroadcaster, WsMessage};
+use crate::hydraulic_simulator::{HydraulicSimulator, SimulatorOutput};
+use crate::models::{ClepsydraConfig, HydraulicMetrics, PidState, SensorData};
+use crate::websocket::WebSocketBroadcaster;
 
 #[derive(Clone)]
 struct AppState {
+    config: Arc<AppConfig>,
     broadcaster: Arc<WebSocketBroadcaster>,
     store: Arc<ClickHouseStore>,
-    hydraulic_model: Arc<HydraulicModel>,
     alert_manager: Arc<AlertManager>,
-    compensation_controller: Arc<CompensationController>,
     daily_error_map: Arc<Mutex<HashMap<String, f64>>>,
-    last_update: Arc<Mutex<HashMap<String, chrono::DateTime<Utc>>>>,
+    last_update: Arc<Mutex<HashMap<String, chrono::DateTime<chrono::Utc>>>>,
+    pid_states: Arc<Mutex<HashMap<String, PidState>>>,
     configs: Arc<Mutex<HashMap<String, ClepsydraConfig>>>,
 }
 
@@ -59,91 +67,121 @@ async fn main() -> Result<()> {
 
     info!("启动古代水运仪象台漏壶水力精度仿真系统...");
 
+    let config_path = std::env::var("APP_CONFIG")
+        .unwrap_or_else(|_| "config/app_config.json".to_string());
+    let mut config = AppConfig::load_from_file(&config_path)
+        .unwrap_or_else(|e| {
+            warn!("加载配置文件失败，使用内置默认: {}", e);
+            AppConfig::load_from_file("config/app_config.json")
+                .expect("内置默认配置必须存在")
+        });
+
     let clickhouse_url = std::env::var("CLICKHOUSE_URL")
-        .unwrap_or_else(|_| "http://localhost:8123".to_string());
+        .unwrap_or_else(|_| config.clickhouse.url.clone());
     let clickhouse_db = std::env::var("CLICKHOUSE_DB")
-        .unwrap_or_else(|_| "clepsydra".to_string());
-    let mqtt_broker = std::env::var("MQTT_BROKER")
-        .unwrap_or_else(|_| "localhost".to_string());
-    let mqtt_port: u16 = std::env::var("MQTT_PORT")
-        .unwrap_or_else(|_| "1883".to_string())
-        .parse()?;
-    let mqtt_topic = std::env::var("MQTT_TOPIC")
-        .unwrap_or_else(|_| "clepsydra/sensor/+".to_string());
+        .unwrap_or_else(|_| config.clickhouse.database.clone());
     let server_port: u16 = std::env::var("SERVER_PORT")
-        .unwrap_or_else(|_| "8080".to_string())
+        .unwrap_or_else(|_| config.server.port.to_string())
         .parse()?;
-    let daily_error_threshold: f64 = std::env::var("DAILY_ERROR_THRESHOLD")
-        .unwrap_or_else(|_| "60.0".to_string())
-        .parse()?;
+    if let Ok(v) = std::env::var("MQTT_BROKER") { config.mqtt.broker = v; }
+    if let Ok(v) = std::env::var("MQTT_PORT") {
+        config.mqtt.port = v.parse().unwrap_or(config.mqtt.port);
+    }
 
     info!("ClickHouse: {}/{}", clickhouse_url, clickhouse_db);
-    info!("MQTT: {}:{}, topic: {}", mqtt_broker, mqtt_port, mqtt_topic);
+    info!("MQTT: {}:{}, topic: {}", config.mqtt.broker, config.mqtt.port, config.mqtt.topic);
     info!("Server port: {}", server_port);
-    info!("日误差阈值: {}秒", daily_error_threshold);
+    info!("日误差阈值: {}秒", config.alerts.daily_error_threshold_seconds);
 
     let store = Arc::new(ClickHouseStore::new(&clickhouse_url, &clickhouse_db)?);
-    let broadcaster = WebSocketBroadcaster::new(1000);
+    let broadcaster = Arc::new(WebSocketBroadcaster::new(
+        config.channels.alarm_broadcast_capacity,
+    ));
     let hydraulic_model = Arc::new(HydraulicModel::new());
-    let alert_manager = Arc::new(AlertManager::new(daily_error_threshold));
-    let compensation_controller = Arc::new(CompensationController::new());
-    let daily_error_map = Arc::new(Mutex::new(HashMap::new()));
-    let last_update = Arc::new(Mutex::new(HashMap::new()));
+    let alert_manager = Arc::new(AlertManager::new(
+        config.alerts.daily_error_threshold_seconds,
+    ));
 
-    info!("加载漏壶配置...");
-    let configs = Arc::new(Mutex::new(HashMap::new()));
+    let configs: Arc<Mutex<HashMap<String, ClepsydraConfig>>> = Arc::new(Mutex::new(HashMap::new()));
     match store.get_all_configs().await {
         Ok(cfg_list) => {
             let mut map = configs.lock();
             for cfg in cfg_list {
-                info!("  {} - {}", cfg.clepsydra_id, cfg.name);
+                info!("  {} - {} (DB)", cfg.clepsydra_id, cfg.name);
                 map.insert(cfg.clepsydra_id.clone(), cfg);
             }
         }
         Err(e) => {
-            warn!("加载配置失败（使用默认配置）: {}", e);
-            let default_configs = vec![
-                ("KD1", "天上壶", 120.0, 20.0, 2.5, 78.54, 0.3, 0.62),
-                ("KD2", "夜漏壶", 100.0, 15.0, 2.5, 78.54, 0.3, 0.62),
-                ("KD3", "平水壶", 80.0, 10.0, 2.5, 78.54, 0.3, 0.62),
-                ("KD4", "万分水", 60.0, 5.0, 2.5, 78.54, 0.3, 0.62),
-            ];
+            warn!("加载DB配置失败，使用JSON文件配置: {}", e);
             let mut map = configs.lock();
-            for (id, name, max_l, min_l, std_flow, area, orifice, coef) in default_configs {
-                map.insert(id.to_string(), ClepsydraConfig {
-                    clepsydra_id: id.to_string(),
-                    name: name.to_string(),
-                    max_level: max_l,
-                    min_level: min_l,
-                    standard_flow: std_flow,
-                    cross_section_area: area,
-                    orifice_diameter: orifice,
-                    flow_coefficient: coef,
-                });
+            for (id, cfg) in config.to_clepsydra_map() {
+                info!("  {} - {} (JSON)", id, cfg.name);
+                map.insert(id, cfg);
             }
         }
     }
 
+    let cfg_arc = Arc::new(config);
+
+    let (dtu_tx, sim_rx) = tokio::sync::mpsc::channel::<ValidatedSensor>(
+        cfg_arc.channels.dtu_to_simulator_buffer,
+    );
+    let (sim_tx, comp_rx) = tokio::sync::mpsc::channel::<SimulatorOutput>(
+        cfg_arc.channels.simulator_to_compensator_buffer,
+    );
+    let (comp_tx, alm_rx) = tokio::sync::mpsc::channel::<CompensatedOutput>(
+        cfg_arc.channels.compensator_to_alarm_buffer,
+    );
+
+    let simulator = HydraulicSimulator::new(
+        cfg_arc.clone(),
+        configs.clone(),
+        hydraulic_model.clone(),
+        sim_rx,
+        sim_tx,
+    );
+    let (last_update_ref, daily_error_ref) = simulator.get_state_refs();
+
+    let compensator = ErrorCompensator::new(cfg_arc.clone(), comp_rx, comp_tx);
+    let pid_states_ref = compensator.get_pid_states_ref();
+
+    let alarm_ws = AlarmWsService::new(
+        alert_manager.clone(),
+        store.clone(),
+        broadcaster.clone(),
+        alm_rx,
+    );
+
     let state = AppState {
+        config: cfg_arc.clone(),
         broadcaster: broadcaster.clone(),
         store: store.clone(),
-        hydraulic_model: hydraulic_model.clone(),
         alert_manager: alert_manager.clone(),
-        compensation_controller: compensation_controller.clone(),
-        daily_error_map: daily_error_map.clone(),
-        last_update: last_update.clone(),
+        daily_error_map: daily_error_ref.clone(),
+        last_update: last_update_ref.clone(),
+        pid_states: pid_states_ref.clone(),
         configs: configs.clone(),
     };
 
-    let state_clone = state.clone();
+    let dtu = DtuReceiver::new(cfg_arc.clone(), dtu_tx);
     tokio::spawn(async move {
-        if let Err(e) = start_mqtt_consumer(
-            mqtt_broker,
-            mqtt_port,
-            &mqtt_topic,
-            state_clone,
-        ).await {
-            error!("MQTT消费者错误: {}", e);
+        if let Err(e) = dtu.run().await {
+            error!("[DTU] 任务异常退出: {}", e);
+        }
+    });
+    tokio::spawn(async move {
+        if let Err(e) = simulator.run().await {
+            error!("[SIM] 任务异常退出: {}", e);
+        }
+    });
+    tokio::spawn(async move {
+        if let Err(e) = compensator.run().await {
+            error!("[PID] 任务异常退出: {}", e);
+        }
+    });
+    tokio::spawn(async move {
+        if let Err(e) = alarm_ws.run().await {
+            error!("[ALM] 任务异常退出: {}", e);
         }
     });
 
@@ -164,135 +202,6 @@ async fn main() -> Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
-}
-
-async fn start_mqtt_consumer(
-    broker: String,
-    port: u16,
-    topic: &str,
-    state: AppState,
-) -> Result<()> {
-    let mut receiver = mqtt_receiver::MqttReceiver::new(
-        &broker,
-        port,
-        &format!("clepsydra-backend-{}", Uuid::new_v4()),
-        topic,
-    )?;
-
-    receiver.subscribe().await?;
-
-    let state_clone = state.clone();
-    receiver.run(move |sensor_data| {
-        let state = state_clone.clone();
-        tokio::spawn(async move {
-            process_sensor_data(state, sensor_data).await;
-        });
-    }).await?;
-
-    Ok(())
-}
-
-async fn process_sensor_data(state: AppState, sensor: SensorData) {
-    debug!("收到传感器数据: {} - {:.2}cm", sensor.clepsydra_id, sensor.water_level);
-
-    state.broadcaster.broadcast_sensor_data(&sensor);
-
-    if let Err(e) = state.store.insert_sensor_data(&sensor).await {
-        warn!("写入传感器数据失败: {}", e);
-    }
-
-    let config = {
-        let configs = state.configs.lock();
-        configs.get(&sensor.clepsydra_id).cloned()
-    };
-
-    if config.is_none() {
-        warn!("未知漏壶ID: {}", sensor.clepsydra_id);
-        return;
-    }
-    let config = config.unwrap();
-
-    if let Some(alert) = state.alert_manager.check_water_level(&sensor, &config) {
-        state.broadcaster.broadcast_alert(&alert);
-        let _ = state.store.insert_alert(&alert).await;
-        warn!("水位告警: {}", alert.message);
-    }
-
-    if let Some(alert) = state.alert_manager.check_temperature(&sensor) {
-        state.broadcaster.broadcast_alert(&alert);
-        let _ = state.store.insert_alert(&alert).await;
-    }
-
-    let now = Utc::now();
-    let dt = {
-        let mut last = state.last_update.lock();
-        let prev = last.get(&sensor.clepsydra_id).copied().unwrap_or(now);
-        let delta = (now - prev).num_milliseconds() as f64 / 1000.0;
-        last.insert(sensor.clepsydra_id.clone(), now);
-        delta.max(0.1)
-    };
-
-    let theoretical_flow = state.hydraulic_model.calculate_theoretical_flow(
-        sensor.water_level,
-        &config,
-        sensor.water_temp,
-    );
-
-    let evaporation_rate = state.hydraulic_model.calculate_evaporation_rate(
-        sensor.water_temp,
-        sensor.humidity,
-        config.cross_section_area,
-        sensor.quality,
-        sensor.pressure,
-    );
-
-    let flow_error = state.hydraulic_model.calculate_flow_error(
-        theoretical_flow,
-        sensor.flow_rate,
-    );
-
-    let daily_error = {
-        let mut errors = state.daily_error_map.lock();
-        let current = errors.get(&sensor.clepsydra_id).copied().unwrap_or(0.0);
-        let new_error = state.hydraulic_model.update_daily_error(current, flow_error, dt);
-        errors.insert(sensor.clepsydra_id.clone(), new_error);
-        new_error
-    };
-
-    let (compensation_flow, pid_state) = state.compensation_controller.compute_compensation(
-        &sensor.clepsydra_id,
-        config.standard_flow,
-        sensor.flow_rate,
-        sensor.water_temp,
-        sensor.quality,
-        dt,
-    );
-
-    let metrics = HydraulicMetrics {
-        timestamp: now,
-        clepsydra_id: sensor.clepsydra_id.clone(),
-        theoretical_flow,
-        actual_flow: sensor.flow_rate,
-        flow_error,
-        evaporation_rate,
-        daily_error_seconds: daily_error,
-        compensation_flow,
-        pid_kp: pid_state.kp,
-        pid_ki: pid_state.ki,
-        pid_kd: pid_state.kd,
-    };
-
-    state.broadcaster.broadcast_metrics(&metrics);
-
-    if let Err(e) = state.store.insert_metrics(&metrics).await {
-        warn!("写入水力指标失败: {}", e);
-    }
-
-    if let Some(alert) = state.alert_manager.check_daily_error(&metrics) {
-        state.broadcaster.broadcast_alert(&alert);
-        let _ = state.store.insert_alert(&alert).await;
-        warn!("日误差告警: {}", alert.message);
-    }
 }
 
 async fn ws_handler(
@@ -326,7 +235,7 @@ async fn ws_handler(
 
         let recv_task = tokio::spawn(async move {
             while let Some(Ok(msg)) = receiver.next().await {
-                debug!("收到WebSocket消息: {:?}", msg);
+                tracing::debug!("收到WebSocket消息: {:?}", msg);
             }
         });
 
@@ -339,7 +248,9 @@ async fn ws_handler(
     })
 }
 
-async fn get_configs(State(state): State<AppState>) -> Json<ApiResponse<Vec<ClepsydraConfig>>> {
+async fn get_configs(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<Vec<ClepsydraConfig>>> {
     let configs = state.configs.lock();
     let config_list: Vec<ClepsydraConfig> = configs.values().cloned().collect();
     Json(ApiResponse {
@@ -390,7 +301,9 @@ async fn get_alerts(
     })
 }
 
-async fn get_status(State(state): State<AppState>) -> Json<ApiResponse<serde_json::Value>> {
+async fn get_status(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<serde_json::Value>> {
     let client_count = state.broadcaster.client_count();
     let configs = state.configs.lock();
     let errors = state.daily_error_map.lock();
@@ -412,6 +325,8 @@ async fn get_status(State(state): State<AppState>) -> Json<ApiResponse<serde_jso
         data: Some(serde_json::json!({
             "ws_clients": client_count,
             "clepsydras": clepsydra_status,
+            "mqtt_broker": state.config.mqtt.broker,
+            "clickhouse_url": state.config.clickhouse.url,
         })),
         message: None,
     })

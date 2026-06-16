@@ -381,309 +381,41 @@
     </script>
 
     <script type="module">
-        import * as THREE from 'three';
-        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-        import { WaterParticles } from './src/particles.js';
-        import { ClepsydraScene } from './src/clepsydra.js';
+        import { Clepsydra3D } from './js/clepsydra_3d.js';
+        import { PrecisionPanel } from './js/precision_panel.js';
 
         const canvas = document.getElementById('three-canvas');
-        const scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x0a0a1a);
-        scene.fog = new THREE.Fog(0x0a0a1a, 50, 200);
+        const scene3d = new Clepsydra3D(canvas);
+        const panel = new PrecisionPanel();
 
-        const camera = new THREE.PerspectiveCamera(60, canvas.clientWidth / canvas.clientHeight, 0.1, 1000);
-        camera.position.set(40, 30, 50);
-
-        const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-        renderer.setSize(canvas.clientWidth, canvas.clientHeight);
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-        renderer.shadowMap.enabled = true;
-        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-
-        const controls = new OrbitControls(camera, renderer.domElement);
-        controls.enableDamping = true;
-        controls.dampingFactor = 0.05;
-        controls.minDistance = 20;
-        controls.maxDistance = 150;
-        controls.maxPolarAngle = Math.PI / 2.1;
-
-        const ambientLight = new THREE.AmbientLight(0x404060, 0.5);
-        scene.add(ambientLight);
-
-        const mainLight = new THREE.DirectionalLight(0xfff5e6, 1.2);
-        mainLight.position.set(30, 50, 30);
-        mainLight.castShadow = true;
-        mainLight.shadow.mapSize.width = 2048;
-        mainLight.shadow.mapSize.height = 2048;
-        mainLight.shadow.camera.near = 0.5;
-        mainLight.shadow.camera.far = 200;
-        mainLight.shadow.camera.left = -60;
-        mainLight.shadow.camera.right = 60;
-        mainLight.shadow.camera.top = 60;
-        mainLight.shadow.camera.bottom = -60;
-        scene.add(mainLight);
-
-        const fillLight = new THREE.DirectionalLight(0x4488ff, 0.3);
-        fillLight.position.set(-30, 20, -30);
-        scene.add(fillLight);
-
-        const groundGeometry = new THREE.CircleGeometry(80, 64);
-        const groundMaterial = new THREE.MeshStandardMaterial({
-            color: 0x2a2a3a,
-            roughness: 0.8,
-            metalness: 0.2
-        });
-        const ground = new THREE.Mesh(groundGeometry, groundMaterial);
-        ground.rotation.x = -Math.PI / 2;
-        ground.receiveShadow = true;
-        scene.add(ground);
-
-        const gridHelper = new THREE.GridHelper(80, 40, 0x333355, 0x222244);
-        gridHelper.position.y = 0.01;
-        scene.add(gridHelper);
-
-        const clepsydraScene = new ClepsydraScene(scene);
-        const waterParticles = new WaterParticles(scene);
-
-        let autoRotate = true;
-        let showParticles = false;
-        let showLabels = true;
-
-        const clepsydraData = {
-            KD1: { name: '天上壶', water_level: 100, flow_rate: 2.5, water_temp: 20, humidity: 60, quality: 1.0, max_level: 120, min_level: 20 },
-            KD2: { name: '夜漏壶', water_level: 85, flow_rate: 2.5, water_temp: 20, humidity: 60, quality: 1.0, max_level: 100, min_level: 15 },
-            KD3: { name: '平水壶', water_level: 65, flow_rate: 2.5, water_temp: 20, humidity: 60, quality: 1.0, max_level: 80, min_level: 10 },
-            KD4: { name: '万分水', water_level: 50, flow_rate: 2.5, water_temp: 20, humidity: 60, quality: 1.0, max_level: 60, min_level: 5 },
-        };
-
-        const metricsData = {
-            KD1: { theoretical_flow: 2.5, actual_flow: 2.5, flow_error: 0, evaporation_rate: 0.01, daily_error_seconds: 0, compensation_flow: 0 }
-        };
-
-        const alerts = [];
-
-        function updateUI() {
-            const list = document.getElementById('clepsydraList');
-            list.innerHTML = '';
-
-            for (const [id, data] of Object.entries(clepsydraData)) {
-                const metrics = metricsData[id] || { daily_error_seconds: 0, compensation_flow: 0 };
-                const levelPercent = ((data.water_level - data.min_level) / (data.max_level - data.min_level)) * 100;
-                const hasAlert = alerts.some(a => a.clepsydra_id === id && !a.resolved);
-                const criticalAlert = alerts.some(a => a.clepsydra_id === id && a.alert_level === 'CRITICAL' && !a.resolved);
-
-                const cardClass = criticalAlert ? 'critical' : (hasAlert ? 'warning' : '');
-
-                const card = document.createElement('div');
-                card.className = `clepsydra-card ${cardClass}`;
-                card.innerHTML = `
-                    <div class="clepsydra-name">${data.name} <span style="font-size: 11px; color: #888;">(${id})</span></div>
-                    <div class="data-grid">
-                        <div class="data-item">
-                            <span class="data-label">水位</span>
-                            <span class="data-value">${data.water_level.toFixed(2)}cm</span>
-                        </div>
-                        <div class="data-item">
-                            <span class="data-label">流量</span>
-                            <span class="data-value">${data.flow_rate.toFixed(4)}mL/s</span>
-                        </div>
-                        <div class="data-item">
-                            <span class="data-label">水温</span>
-                            <span class="data-value">${data.water_temp.toFixed(1)}°C</span>
-                        </div>
-                        <div class="data-item">
-                            <span class="data-label">湿度</span>
-                            <span class="data-value">${data.humidity.toFixed(1)}%</span>
-                        </div>
-                    </div>
-                    <div class="water-bar">
-                        <div class="water-bar-fill" style="width: ${Math.min(100, Math.max(0, levelPercent))}%"></div>
-                    </div>
-                    <div style="display: flex; justify-content: space-between; margin-top: 8px; font-size: 11px;">
-                        <span style="color: #888;">日误差: <span style="color: ${Math.abs(metrics.daily_error_seconds) > 60 ? '#ff6666' : '#66ff66'};">${metrics.daily_error_seconds.toFixed(2)}s</span></span>
-                        <span class="compensation-badge ${metrics.compensation_flow >= 0 ? 'positive' : 'negative'}">
-                            PID: ${metrics.compensation_flow >= 0 ? '+' : ''}${metrics.compensation_flow.toFixed(3)}
-                        </span>
-                    </div>
-                `;
-                list.appendChild(card);
-            }
-
-            const totalError = Object.values(metricsData).reduce((sum, m) => sum + (m.daily_error_seconds || 0), 0);
-            const errorEl = document.getElementById('dailyErrorPanel');
-            errorEl.textContent = `${total_error.toFixed(2)} 秒`;
-            errorEl.style.color = Math.abs(totalError) > 60 ? '#ff6666' : '#66ff66';
-
-            const mainMetrics = metricsData['KD3'] || metricsData['KD1'] || {};
-            document.getElementById('metricTheoretical').textContent = `${(mainMetrics.theoretical_flow || 0).toFixed(4)} mL/s`;
-            document.getElementById('metricActual').textContent = `${(mainMetrics.actual_flow || 0).toFixed(4)} mL/s`;
-            document.getElementById('metricError').textContent = `${(mainMetrics.flow_error || 0).toFixed(3)} %`;
-            document.getElementById('metricEvap').textContent = `${(mainMetrics.evaporation_rate || 0).toFixed(5)} mL/s`;
-
-            const comp = mainMetrics.compensation_flow || 0;
-            document.getElementById('metricComp').textContent = `${comp >= 0 ? '+' : ''}${comp.toFixed(4)} mL/s`;
-            document.getElementById('metricComp').className = `metrics-value ${comp >= 0 ? 'good' : 'error'}`;
-        }
-
-        function updateAlerts() {
-            const panel = document.getElementById('alertPanel');
-            if (alerts.length === 0) {
-                panel.innerHTML = '<div style="color: #666; font-size: 12px; text-align: center; padding: 20px;">暂无告警</div>';
-                return;
-            }
-
-            panel.innerHTML = '';
-            const activeAlerts = alerts.filter(a => !a.resolved).slice(-5).reverse();
-            for (const alert of activeAlerts) {
-                const level = alert.alert_level?.toLowerCase() || 'warning';
-                const item = document.createElement('div');
-                item.className = `alert-item ${level}`;
-                const time = new Date(alert.timestamp).toLocaleTimeString('zh-CN');
-                item.innerHTML = `
-                    <div class="alert-time">${time} · ${alert.clepsydra_id}</div>
-                    <div class="alert-message">${alert.message}</div>
-                `;
-                panel.appendChild(item);
-            }
-        }
-
-        let ws = null;
-        function connectWebSocket() {
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//${window.location.host}/ws`;
-
-            try {
-                ws = new WebSocket(wsUrl);
-            } catch (e) {
-                ws = new WebSocket('ws://localhost:8080/ws');
-            }
-
-            ws.onopen = function() {
-                document.getElementById('statusDot').classList.add('connected');
-                document.getElementById('statusText').textContent = '已连接';
-            };
-
-            ws.onmessage = function(event) {
-                try {
-                    const data = JSON.parse(event.data);
-                    handleWsMessage(data);
-                } catch (e) {
-                    console.error('解析WebSocket消息失败:', e);
-                }
-            };
-
-            ws.onclose = function() {
-                document.getElementById('statusDot').classList.remove('connected');
-                document.getElementById('statusText').textContent = '连接断开';
-                setTimeout(connectWebSocket, 3000);
-            };
-
-            ws.onerror = function() {
-                document.getElementById('statusDot').classList.remove('connected');
-                document.getElementById('statusText').textContent = '连接错误';
-            };
-        }
-
-        function handleWsMessage(data) {
-            if (data.type === 'SensorData' && data.data) {
-                const sensor = data.data;
-                if (clepsydraData[sensor.clepsydra_id]) {
-                    clepsydraData[sensor.clepsydra_id].water_level = sensor.water_level;
-                    clepsydraData[sensor.clepsydra_id].flow_rate = sensor.flow_rate;
-                    clepsydraData[sensor.clepsydra_id].water_temp = sensor.water_temp;
-                    clepsydraData[sensor.clepsydra_id].humidity = sensor.humidity;
-                    clepsydraData[sensor.clepsydra_id].quality = sensor.quality;
-
-                    const config = clepsydraData[sensor.clepsydra_id];
-                    const levelRatio = (sensor.water_level - config.min_level) / (config.max_level - config.min_level);
-                    clepsydraScene.updateWaterLevel(sensor.clepsydra_id, levelRatio);
-
-                    if (showParticles && sensor.flow_rate > 0) {
-                        const idx = ['KD1', 'KD2', 'KD3', 'KD4'].indexOf(sensor.clepsydra_id);
-                        if (idx >= 0 && idx < 3) {
-                            waterParticles.setFlowRate(idx, sensor.flow_rate / 2.5);
-                        }
-                    }
-                }
-                updateUI();
-            } else if (data.type === 'HydraulicMetrics' && data.data) {
-                const metrics = data.data;
-                metricsData[metrics.clepsydra_id] = metrics;
-                updateUI();
-            } else if (data.type === 'Alert' && data.data) {
-                alerts.push(data.data);
-                if (alerts.length > 50) alerts.shift();
-                updateAlerts();
-                updateUI();
-            }
-        }
-
-        document.getElementById('btnRotate').addEventListener('click', function() {
-            autoRotate = !autoRotate;
-            this.classList.toggle('active', autoRotate);
+        panel.setCallbacks({
+            onSensorUpdate: (id, levelRatio, flowRate) => {
+                scene3d.updateWaterLevel(id, levelRatio);
+                scene3d.setParticleFlow(id, flowRate / 2.5);
+            },
         });
 
-        document.getElementById('btnParticles').addEventListener('click', function() {
-            showParticles = !showParticles;
-            this.classList.toggle('active', showParticles);
-            waterParticles.setVisible(showParticles);
+        document.getElementById('btnRotate').addEventListener('click', function () {
+            scene3d.setAutoRotate(!scene3d.autoRotate);
+            this.classList.toggle('active', scene3d.autoRotate);
         });
 
-        document.getElementById('btnLabels').addEventListener('click', function() {
-            showLabels = !showLabels;
-            this.classList.toggle('active', showLabels);
-            clepsydraScene.setLabelsVisible(showLabels);
+        document.getElementById('btnParticles').addEventListener('click', function () {
+            scene3d.setShowParticles(!scene3d.showParticles);
+            this.classList.toggle('active', scene3d.showParticles);
         });
 
-        function onResize() {
-            camera.aspect = canvas.clientWidth / canvas.clientHeight;
-            camera.updateProjectionMatrix();
-            renderer.setSize(canvas.clientWidth, canvas.clientHeight);
-        }
-        window.addEventListener('resize', onResize);
+        document.getElementById('btnLabels').addEventListener('click', function () {
+            scene3d.setLabelsVisible(!scene3d.showLabels);
+            this.classList.toggle('active', scene3d.showLabels);
+        });
 
-        let lastTime = 0;
-        function animate(currentTime) {
-            requestAnimationFrame(animate);
+        panel.updateUI();
+        panel.updateAlerts();
+        panel.connectWebSocket();
+        scene3d.start();
 
-            const delta = (currentTime - lastTime) / 1000;
-            lastTime = currentTime;
-
-            if (autoRotate) {
-                const angle = delta * 0.1;
-                const radius = camera.position.length();
-                camera.position.x = Math.cos(angle * Math.PI) * radius * 0.7 + camera.position.x * 0.3;
-                camera.position.z = Math.sin(angle * Math.PI) * radius * 0.7 + camera.position.z * 0.3;
-                controls.update();
-            }
-
-            waterParticles.update(delta);
-            clepsydraScene.update(delta);
-
-            renderer.render(scene, camera);
-        }
-
-        updateUI();
-        updateAlerts();
-        connectWebSocket();
-        animate(0);
-
-        setTimeout(() => {
-            if (ws?.readyState !== WebSocket.OPEN) {
-                for (let i = 0; i < 50; i++) {
-                    setTimeout(() => {
-                        for (const id of ['KD1', 'KD2', 'KD3', 'KD4']) {
-                            const data = clepsydraData[id];
-                            if (data) {
-                                const config = data;
-                                const levelRatio = (data.water_level - config.min_level) / (config.max_level - config.min_level);
-                                clepsydraScene.updateWaterLevel(id, levelRatio);
-                            }
-                        }
-                    }, i * 100);
-                }
-            }
-        }, 1000);
+        panel.startSimulationFallback();
     </script>
 </body>
 </html>

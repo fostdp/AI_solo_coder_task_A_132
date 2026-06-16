@@ -1,0 +1,91 @@
+{
+  "mqtt": {
+    "broker": "localhost",
+    "port": 1883,
+    "topic": "clepsydra/sensor/+",
+    "client_id_prefix": "clepsydra-backend",
+    "keep_alive_secs": 30
+  },
+  "clickhouse": {
+    "url": "http://localhost:8123",
+    "database": "clepsydra",
+    "batch_size": 100,
+    "flush_interval_ms": 1000
+  },
+  "server": {
+    "port": 8080,
+    "cors_origins": ["*"]
+  },
+  "hydraulic": {
+    "gravity_cm_s2": 980.665,
+    "standard_pressure_kpa": 101.325,
+    "min_dt_seconds": 0.1,
+    "altitude_m": 0
+  },
+  "pid": {
+    "base_kp": 0.5,
+    "base_ki": 0.05,
+    "base_kd": 0.1,
+    "kf_feedforward": 0.08,
+    "output_min_ml_s": -1.5,
+    "output_max_ml_s": 1.5,
+    "output_rate_limit_ml_s2": 0.3,
+    "integral_limit": 50.0,
+    "temp_coefficient_per_deg": 0.01,
+    "history_window": 5
+  },
+  "alerts": {
+    "daily_error_threshold_seconds": 60.0,
+    "critical_error_multiplier": 2.0,
+    "water_temp_min_c": 0.0,
+    "water_temp_max_c": 50.0
+  },
+  "clepsydras": [
+    {
+      "clepsydra_id": "KD1",
+      "name": "天上壶",
+      "max_level_cm": 120.0,
+      "min_level_cm": 20.0,
+      "standard_flow_ml_s": 2.5,
+      "cross_section_cm2": 78.54,
+      "orifice_diameter_cm": 0.3,
+      "flow_coefficient": 0.62
+    },
+    {
+      "clepsydra_id": "KD2",
+      "name": "夜漏壶",
+      "max_level_cm": 100.0,
+      "min_level_cm": 15.0,
+      "standard_flow_ml_s": 2.5,
+      "cross_section_cm2": 78.54,
+      "orifice_diameter_cm": 0.3,
+      "flow_coefficient": 0.62
+    },
+    {
+      "clepsydra_id": "KD3",
+      "name": "平水壶",
+      "max_level_cm": 80.0,
+      "min_level_cm": 10.0,
+      "standard_flow_ml_s": 2.5,
+      "cross_section_cm2": 78.54,
+      "orifice_diameter_cm": 0.3,
+      "flow_coefficient": 0.62
+    },
+    {
+      "clepsydra_id": "KD4",
+      "name": "万分水",
+      "max_level_cm": 60.0,
+      "min_level_cm": 5.0,
+      "standard_flow_ml_s": 2.5,
+      "cross_section_cm2": 78.54,
+      "orifice_diameter_cm": 0.3,
+      "flow_coefficient": 0.62
+    }
+  ],
+  "channels": {
+    "dtu_to_simulator_buffer": 1000,
+    "simulator_to_compensator_buffer": 500,
+    "compensator_to_alarm_buffer": 500,
+    "alarm_broadcast_capacity": 1000
+  }
+}
